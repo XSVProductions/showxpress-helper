@@ -1,9 +1,11 @@
 import 'package:sx_api/sx_api.dart';
 
 import '../../ps_compat.dart';
+import '../../show/movers.dart';
 import '../../show/show_env.dart';
 import '../../tools/flip.dart';
 import '../../tools/rig.dart';
+import '../../tools/rig_layout.dart';
 import '../../tools/rig_test.dart';
 import '../../tools/skip_flash.dart';
 import '../api.dart';
@@ -16,7 +18,10 @@ final _digits = RegExp(r'^\d+$');
 ///
 /// Port of their cases in `Invoke-Action` and the request loop of `df_aim_gui.ps1`.
 void registerRigRoutes(Engine e) {
-  e.api.get('/api/rig', (req) => rigPreview(e.show()));
+  e.api.get('/api/rig', (req) {
+    final env = e.show();
+    return rigPreview(env, leave: layoutSceneFiles(env));
+  });
   e.api.get('/api/skip', (req) => skipPreview(e.show()));
   e.api.get('/api/rt', (req) => rtPreview(e.show()));
 
@@ -49,14 +54,19 @@ void registerRigRoutes(Engine e) {
       }
       if (!fout.contains('nothing to change')) fo = "  Reversed heads:\n${fout.trimRight()}\n\n  Tonight's Rig:\n";
     }
+    final layout = _layout(env, ids);
     final String out;
     try {
-      out = rigApply(env, ids);
+      out = rigApply(env, ids, leave: layout.scenes);
     } on ToolError catch (x) {
-      if (fo.isEmpty) rethrow;
-      return ToolResult(ok: false, out: fo, error: "The reversed heads WERE saved, but Tonight's Rig was not: ${x.message}");
+      if (fo.isEmpty && layout.scenes.isEmpty) rethrow;
+      return ToolResult(
+        ok: false,
+        out: '$fo${layout.out.trimLeft()}',
+        error: fo.isNotEmpty ? "The reversed heads WERE saved, but Tonight's Rig was not: ${x.message}" : "Tonight's Rig was not saved: ${x.message}",
+      );
     }
-    return '$fo$out\n${_updateSkipFlash(env, ids)}';
+    return '$fo$out\n${_updateSkipFlash(env, ids)}${layout.out}';
   });
 
   e.api.post('/api/rt/install', queue: const Queueable('RIG ID button'), (req) => rtInstall(e.show()));
@@ -76,18 +86,40 @@ void registerRigRoutes(Engine e) {
     if (psTruthy(req.body['rig'])) {
       String? last(String prefix) => out.split('\n').where((l) => RegExp('^$prefix: [\\d,]+\$').hasMatch(l)).lastOrNull?.substring(prefix.length + 2);
       final rigHeads = last('RIGHEADS');
+      var layoutOut = '';
       if (rigHeads != null) {
+        final layout = _layout(env, rigHeadIds([rigHeads]));
+        layoutOut = layout.out;
         try {
-          out += "\n\n  Tonight's Rig:\n${rigApply(env, rigHeadIds([rigHeads]))}";
+          out += "\n\n  Tonight's Rig:\n${rigApply(env, rigHeadIds([rigHeads]), leave: layout.scenes)}";
         } on ToolError catch (x) {
           out += "\n\n  Tonight's Rig NOT updated: ${x.message}";
         }
       }
       final skipHeads = last('SKIPHEADS');
       if (skipHeads != null) out += '\n${_updateSkipFlash(env, skipHeads.split(','))}';
+      out += layoutOut;
+    } else {
+      // the heads moved but which are hung didn't change: the beat scenes and views follow
+      final hung = RigState.read(env).hung ?? [for (final m in showMovers(env)) m.id];
+      out += _layout(env, hung).out;
     }
     return out;
   });
+}
+
+/// The beat scenes, the 2D view and the 3D view follow the hung heads
+/// ([rigLayoutApply]). The report starts with a blank line. A failure is
+/// reported, not thrown, so the rest of the save still goes ahead.
+///
+/// New in the Flutter app.
+({String out, Set<String> scenes}) _layout(ShowEnv env, List<String> heads) {
+  try {
+    final r = rigLayoutApply(env, heads);
+    return (out: '\n\n  Beat scenes and views (from where the heads are in the 2D view):\n${r.out}', scenes: r.scenes);
+  } on ToolError catch (x) {
+    return (out: '\n\n  Beat scenes and views NOT updated: ${x.message}', scenes: <String>{});
+  }
 }
 
 /// SKIP FLASH follows the hung heads too. It needs 2 or more.

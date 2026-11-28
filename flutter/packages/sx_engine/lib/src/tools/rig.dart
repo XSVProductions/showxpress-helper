@@ -187,7 +187,8 @@ class _Chase {
 class _Rig {
   _Rig._(this.movers, this.state, this.scenes);
 
-  factory _Rig.read(ShowEnv env) {
+  /// [leave]: scene files another tool looks after, not trimmed here.
+  factory _Rig.read(ShowEnv env, {Set<String> leave = const {}}) {
     if (!env.file('Live/live.ini').existsSync()) throw ToolError("Show not found at '${env.root}'. NOTHING was changed.");
     final movers = showMovers(env);
     if (movers.isEmpty) throw ToolError('No 140SR/251SR fixtures found in the show. NOTHING was changed.');
@@ -202,6 +203,7 @@ class _Rig {
     final skipFiles = [
       for (final b in info.buttons)
         if (psEq(b.title, 'SKIP FLASH') && isScex(b.name)) b.name,
+      ...leave,
     ];
     for (final f in skipFiles) {
       state.scenes.remove(f);
@@ -252,9 +254,9 @@ class _Rig {
   final List<_Chase> scenes;
 }
 
-/// What the Tonight's Rig screen shows. Writes nothing.
-RigPreview rigPreview(ShowEnv env) {
-  final r = _Rig.read(env);
+/// What the Tonight's Rig screen shows. Writes nothing. [leave] as in [rigApply].
+RigPreview rigPreview(ShowEnv env, {Set<String> leave = const {}}) {
+  final r = _Rig.read(env, leave: leave);
   final hung = r.state.hung ?? [for (final m in r.movers) m.id];
   final flip = FlipState.read(env);
   return RigPreview(
@@ -287,9 +289,10 @@ RigPreview rigPreview(ShowEnv env) {
 }
 
 /// Trims or restores every chase scene for the hung [heads]. Returns the
-/// report text.
-String rigApply(ShowEnv env, List<String> heads) {
-  final r = _Rig.read(env);
+/// report text. Scene files in [leave] are left alone and forgotten, like
+/// SKIP FLASH: the beat scenes that follow the layout (`rig_layout.dart`).
+String rigApply(ShowEnv env, List<String> heads, {Set<String> leave = const {}}) {
+  final r = _Rig.read(env, leave: leave);
   env.requireSxClosed();
   final ids = rigHeadIds(heads);
   final known = {for (final m in r.movers) m.id};
