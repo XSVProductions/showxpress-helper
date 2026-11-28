@@ -58,15 +58,26 @@ PLL_PHASE = 0.30  # how much of a kick's timing error moves the beat
 PLL_PERIOD = 0.04  # ...and the tempo
 PLL_WINDOW = 0.22  # a kick within this share of a beat of the clock counts
 
+REF_UP_S, REF_DOWN_S = 1.0, 45.0  # the groove level follows the low end up in a second, down only slowly
 BREAK_DB = 10.0  # low end this far under the groove level = break
 BREAK_HOLD_BEATS = 1.5
-DROP_DB = 6.0  # low end back within this of the groove level = drop / return
+CUT_GATE_DB = 3.0  # with the low end less cut than this (over ~1.5 s) nothing is a build
+DROP_DB = 2.0  # low end back within this of the groove level = drop / return
+KICK_BACK_DB = 2.5  # a kick within this of the groove's kicks = the kick is back at full weight
 MIN_BREAK_BEATS = 4.0
 BUILD_ON, BUILD_OFF = 0.35, 0.20
 BIG_DROP_BUILD = 0.50  # a break whose build reached this ends in a DROP
 DROP_BEATS = 32  # how long DROP lasts before GROOVE
 GAP_DB = 15.0
-RISER_BEATS, RISER_DB, RISER_WEIGHT = 8, 10.0, 0.4  # highs up 10 dB over 8 beats = a full riser
+# A build is a trend, so it is judged on three 1.5 s steps (four 1.5 s averages,
+# the last 6 s): each step must go the same way, none can be most of the
+# whole (that is a cut, not a fade), and the whole must go far enough.
+STEP_S, STEPS = 1.5, 3
+STEP_MAX_SHARE = 0.6
+FADE_STEP_DB, FADE_FROM_DB, FADE_FULL_DB = 0.7, 3.0, 10.0  # the low end fading out further each step
+RISE_STEP_DB, RISE_FROM_DB, RISE_FULL_DB = 0.4, 2.0, 7.0  # the highs climbing each step (a riser, a filter opening)
+ROLL_FROM, ROLL_FULL = 1.5, 4.0  # snares per beat: 8ths and faster count as a roll, 16ths as a full one
+BUILD_RISE_S = 1.0  # how fast the build level follows the score up
 
 GROOVE, BREAK, BUILD, DROP = 'GROOVE', 'BREAK', 'BUILD', 'DROP'
 
@@ -208,8 +219,11 @@ class Detector:
         self.high_avg = SILENCE_DB
         self.full_fast = SILENCE_DB
         self.full_slow = SILENCE_DB
-        self.high_hist = deque(maxlen=int(12.0 / HOP_S))
+        self.low_slow = SILENCE_DB  # the low end over ~1.5 s: how much of it a build has cut
+        self.low_fast = SILENCE_DB  # ...and over ~80 ms: back at full weight?
+        self.trend = deque(maxlen=int(STEP_S * (STEPS + 1) / 0.25))  # (low end cut, highs) every 250 ms
         self.ref: float | None = None
+        self.kick_ref: float | None = None  # how loud the groove's kicks are (the low band at each kick)
         # sections
         self.state = GROOVE
         self.state_t = 0.0
@@ -261,7 +275,8 @@ class Detector:
         self.high_avg += (high - self.high_avg) * _ema_coef(0.50)
         self.full_fast += (full - self.full_fast) * _ema_coef(0.03)
         self.full_slow += (full - self.full_slow) * _ema_coef(0.50)
-        self.high_hist.append(self.high_avg)
+        self.low_slow += (low - self.low_slow) * _ema_coef(1.5)
+        self.low_fast += (low - self.low_fast) * _ema_coef(0.08)
 
         self._tempo(t, tk if kick is not None else None)
         self._beats(t)
@@ -404,44 +419,42 @@ class Detector:
 
     def _sections(self, t: float, tk: float | None):
         b = self._beat_s()
-        groovy = self.state in (GROOVE, DROP)
         if self.ref is None:
             if len(self.kicks_t) >= 6 and self.low_avg > SILENCE_DB + 10:
                 self.ref = self.low_avg
+                self.low_slow = self.low_avg
             return
-        if groovy:
-            k = 0.2 if self.low_avg > self.ref else 0.002
-            self.ref += (self.low_avg - self.ref) * k
-            if self.state == DROP and self.drop_left <= 0:
-                self._set_state(t, GROOVE)
+        kick_lv = self._low_peak() if tk is not None else None
+        if self.n % int(round(0.25 / HOP_S)) == 0:
+            self.trend.append((self.ref - self.low_avg, self.high_avg))
+        if self.state in (GROOVE, DROP):
+            # the groove level: up within a second, down only slowly, so a build
+            # that takes the low end away over 16 bars still shows as a cut
+            k = _ema_coef(REF_UP_S) if self.low_slow > self.ref else _ema_coef(REF_DOWN_S)
+            self.ref += (self.low_slow - self.ref) * k
+            if kick_lv is not None and self.low_slow > self.ref - CUT_GATE_DB:
+                self.kick_ref = kick_lv if self.kick_ref is None else self.kick_ref + (kick_lv - self.kick_ref) * 0.1
+            if self.state == DROP:
+                self.drop_left -= HOP_S / b
+                if self.drop_left <= 0:
+                    self._set_state(t, GROOVE)
+            self._follow_build(self._build_score(t, b))
             if self.low_avg < self.ref - BREAK_DB:
                 if self.below_since is None:
                     self.below_since = t
                 if t - self.below_since >= BREAK_HOLD_BEATS * b:
-                    self.build = 0.0
-                    self.build_peak = 0.0
-                    self.gap_sent = False
-                    self.break_t = self.below_since
-                    self._set_state(self.below_since, BREAK)
+                    self._start_break(self.below_since, BREAK)
+                    return
             else:
                 self.below_since = None
-            if self.state == DROP:
-                self.drop_left -= HOP_S / b
+            # a build with the low end filtered, not gone: no break before it
+            if self.build >= BUILD_ON:
+                self._start_break(t, BUILD)
             return
 
         # in a break or a build
         self.below_since = None
-        rate = sum(1 for s in self.snares_t if t - s < 2 * b) / 2.0
-        density = 0.0 if rate < 0.25 else min(1.0, max(0.0, 0.3 + 0.25 * math.log2(rate)))
-        back = int(RISER_BEATS * b / HOP_S)
-        riser = 0.0
-        if len(self.high_hist) > back:
-            riser = min(1.0, max(0.0, (self.high_hist[-1] - self.high_hist[-1 - back]) / RISER_DB))
-        score = 1.0 - (1.0 - density) * (1.0 - RISER_WEIGHT * riser)
-        if score > self.build:
-            self.build += (score - self.build) * _ema_coef(0.25)
-        else:
-            self.build -= min(self.build - score, HOP_S / (4 * b) * 0.5)
+        self._follow_build(self._build_score(t, b))
         self.build_peak = max(self.build_peak, self.build)
         if self.state == BREAK and self.build >= BUILD_ON:
             self._set_state(t, BUILD)
@@ -455,27 +468,75 @@ class Detector:
             self.gap_sent = True
             self._emit(t, 'gap', self.build)
 
-        # kick and bass are back
+        # kick and bass are back at full weight: a kick as loud as the groove's,
+        # or the low end itself back up
         long_enough = t - self.break_t >= MIN_BREAK_BEATS * b
-        if tk is not None and long_enough and self._low_peak() >= self.ref - DROP_DB:
+        kick_back = kick_lv is not None and self.kick_ref is not None and kick_lv >= self.kick_ref - KICK_BACK_DB
+        low_back = self.low_fast >= self.ref - DROP_DB
+        if long_enough and (kick_back or low_back):
+            at = tk if kick_back else t
             big = self.build_peak >= BIG_DROP_BUILD
-            self._emit(tk, 'drop' if big else 'return', self.build_peak)
+            self._emit(at, 'drop' if big else 'return', self.build_peak)
             # the drop is bar 1
             if self.period:
                 prev = self.next_beat - self.period
-                n = self.beat_n - 1 if abs(tk - prev) <= abs(tk - self.next_beat) else self.beat_n
+                n = self.beat_n - 1 if abs(at - prev) <= abs(at - self.next_beat) else self.beat_n
                 self.bar_off = n % 4
                 self.slot = [0.0, 0.0, 0.0, 0.0]
             self.build = 0.0
+            self.low_slow = max(self.low_slow, self.ref - DROP_DB)  # the low end is back: no cut left over
             if big:
                 self.drop_left = DROP_BEATS
-                self._set_state(tk, DROP)
+                self._set_state(at, DROP)
             else:
-                self._set_state(tk, GROOVE)
+                self._set_state(at, GROOVE)
+
+    def _start_break(self, since: float, state: str):
+        self.build_peak = self.build if state == BUILD else 0.0
+        self.gap_sent = False
+        self.break_t = since
+        self.below_since = None
+        self._set_state(since, state)
+
+    def _build_score(self, t: float, b: float) -> float:
+        """How much it sounds like a build now, 0..1. Only with the low end
+        cut (a build takes the bass away), and then only for something that
+        keeps going one way: the bass fading out further, the highs climbing,
+        or a snare roll. A breakdown that just sits there with the bass out
+        is not a build, and with the kick and bass at full weight nothing is."""
+        cut = self.ref - self.low_slow
+        if cut < CUT_GATE_DB or len(self.trend) < self.trend.maxlen:
+            return 0.0
+        fade = _trend([c for c, _ in self.trend], FADE_STEP_DB, FADE_FROM_DB, FADE_FULL_DB)
+        rise = _trend([h for _, h in self.trend], RISE_STEP_DB, RISE_FROM_DB, RISE_FULL_DB)
+        per_beat = sum(1 for s in self.snares_t if t - s < 2 * b) / 2.0
+        roll = min(1.0, max(0.0, (per_beat - ROLL_FROM) / (ROLL_FULL - ROLL_FROM)))
+        return 1.0 - (1.0 - fade) * (1.0 - rise) * (1.0 - roll)
+
+    def _follow_build(self, score: float):
+        """The build level follows the score: up in about a second, down at most half a level per 4 beats."""
+        if score > self.build:
+            self.build += (score - self.build) * _ema_coef(BUILD_RISE_S)
+        else:
+            self.build -= min(self.build - score, HOP_S / (4 * self._beat_s()) * 0.5)
 
     def _low_peak(self) -> float:
         """The low band's level just now: a kick that is back at full weight."""
         return self.kick_on.level()
+
+
+def _trend(v: list[float], step: float, lo: float, full: float) -> float:
+    """0..1: how far [v] (oldest first, every 250 ms) went up over its last
+    STEPS steps of STEP_S, when every step went up by at least [step] and no
+    step was more than STEP_MAX_SHARE of the whole. [lo] or less counts 0,
+    [full] or more 1."""
+    n = int(round(STEP_S / 0.25))
+    means = [sum(v[len(v) - (i + 1) * n : len(v) - i * n]) / n for i in reversed(range(STEPS + 1))]
+    steps = [b - a for a, b in zip(means, means[1:])]
+    total = means[-1] - means[0]
+    if min(steps) < step or max(steps) > STEP_MAX_SHARE * total:
+        return 0.0
+    return min(1.0, max(0.0, (total - lo) / (full - lo)))
 
 
 def run(y: np.ndarray, fs: int, block_s: float = 0.05) -> Detector:

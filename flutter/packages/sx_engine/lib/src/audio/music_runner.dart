@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:sx_api/sx_api.dart';
 
 import 'audio_input.dart';
+import 'audio_recorder.dart';
 import 'music_actions.dart';
 import 'music_detector.dart';
 
@@ -56,7 +57,8 @@ void writeMusicSettings(File f, MusicSettings s) {
 
 /// Starts and stops the listener, passes it new settings, and keeps its last status.
 class MusicRunner {
-  MusicRunner({required this.settingsFile, required this.os2lPort, required this.playerRunning});
+  MusicRunner({required this.settingsFile, required this.os2lPort, required this.playerRunning, String Function()? recordingsFolder})
+    : recordingsFolder = recordingsFolder ?? defaultRecordingsFolder;
 
   final File Function() settingsFile;
 
@@ -65,6 +67,9 @@ class MusicRunner {
 
   /// True while the SX Player plays: then it, not ShowXpress, gets the messages.
   final bool Function() playerRunning;
+
+  /// Where recordings of what it hears go.
+  final String Function() recordingsFolder;
 
   _Listener? _l;
   String _device = ''; // the input the running listener opened
@@ -82,6 +87,8 @@ class MusicRunner {
       'link': live && s.link.isNotEmpty ? (playerRunning() ? 'SX Player' : 'ShowXpress') : '',
       if (!live) 'section': '',
       if (!live) 'on': <String>[],
+      if (!live) 'recording': '',
+      if (!live) 'recordedS': 0,
     });
   }
 
@@ -111,6 +118,24 @@ class MusicRunner {
       return;
     }
     _l?.commands.send(s.toJson());
+  }
+
+  /// Starts recording what it hears to a new WAV file in [recordingsFolder]
+  /// (listening first, when it isn't), or stops the recording. Stopping
+  /// listening stops the recording too.
+  Future<MusicStatus> record(bool on) async {
+    if (on) {
+      if (!running) await start();
+      if (!running) return status();
+      final path = p.join(recordingsFolder(), recordingName(DateTime.now()));
+      _l?.commands.send('rec:$path');
+    } else {
+      if (!running) return status();
+      _l?.commands.send('rec-stop');
+    }
+    // the listener's next status says whether it is recording
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    return status();
   }
 
   /// Stops listening: every button it holds is released first.
@@ -229,6 +254,15 @@ Future<void> _main((_Args, SendPort) a) async {
   var lastDrop = '';
   var lastStatus = -1.0;
   final done = Completer<void>();
+  AudioRecorder? rec;
+  var recError = '';
+  var fed = 0; // samples given to the detector
+  var held = '';
+
+  void stopRecording() {
+    rec?.close();
+    rec = null;
+  }
 
   void status() {
     owner.send(
@@ -244,6 +278,9 @@ Future<void> _main((_Args, SendPort) a) async {
         link: out.connected ? 'on' : '',
         linkError: out.connected ? '' : out.error,
         on: actions.on.toList(),
+        recording: rec?.path ?? '',
+        recordedS: rec?.seconds ?? 0,
+        error: recError,
       ).toJson(),
     );
   }
@@ -251,6 +288,16 @@ Future<void> _main((_Args, SendPort) a) async {
   commands.listen((m) {
     if (m == 'q') {
       if (!done.isCompleted) done.complete();
+    } else if (m is String && m.startsWith('rec:')) {
+      stopRecording();
+      try {
+        rec = AudioRecorder.start(m.substring(4), input.fs, t0: fed / input.fs);
+        recError = '';
+      } on FileSystemException catch (e) {
+        recError = 'Could not record to ${m.substring(4)}: ${e.osError?.message ?? e.message}';
+      }
+    } else if (m == 'rec-stop') {
+      stopRecording();
     } else if (m is Map) {
       settings = MusicSettings.fromJson(m.cast<String, Object?>());
       out.send(actions.releaseAll());
@@ -264,7 +311,14 @@ Future<void> _main((_Args, SendPort) a) async {
     final t = now();
     final x = input.read();
     if (x.isNotEmpty) {
+      fed += x.length;
+      final r = rec;
+      if (r != null) {
+        r.add(x);
+        if (r.full) stopRecording();
+      }
       for (final e in det.feed(x)) {
+        rec?.event(e);
         if (e.kind == MusicEventKind.beat) bar = e.bar;
         if (e.kind == MusicEventKind.drop) {
           final d = DateTime.now();
@@ -274,6 +328,11 @@ Future<void> _main((_Args, SendPort) a) async {
       }
     }
     out.send(actions.tick(t));
+    final h = actions.on.join(', ');
+    if (h != held) {
+      held = h;
+      rec?.note(fed / input.fs, h.isEmpty ? 'lights: nothing held' : 'lights: $h');
+    }
     if (t - lastStatus > 0.2) {
       lastStatus = t;
       status();
@@ -282,6 +341,7 @@ Future<void> _main((_Args, SendPort) a) async {
 
   await done.future;
   loop.cancel();
+  stopRecording();
   out.send(actions.releaseAll());
   await Future<void>.delayed(const Duration(milliseconds: 50));
   out.close();

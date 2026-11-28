@@ -45,15 +45,26 @@ const _pllPhase = 0.30; // how much of a kick's timing error moves the beat
 const _pllPeriod = 0.04; // ...and the tempo
 const _pllWindow = 0.22; // a kick within this share of a beat of the clock counts
 
+const _refUpS = 1.0, _refDownS = 45.0; // the groove level follows the low end up in a second, down only slowly
 const _breakDb = 10.0; // low end this far under the groove level = break
 const _breakHoldBeats = 1.5;
-const _dropDb = 6.0; // low end back within this of the groove level = drop / return
+const _cutGateDb = 3.0; // with the low end less cut than this (over ~1.5 s) nothing is a build
+const _dropDb = 2.0; // low end back within this of the groove level = drop / return
+const _kickBackDb = 2.5; // a kick within this of the groove's kicks = the kick is back at full weight
 const _minBreakBeats = 4.0;
 const _buildOn = 0.35, _buildOff = 0.20;
 const _bigDropBuild = 0.50; // a break whose build reached this ends in a DROP
 const _dropBeats = 32.0; // how long DROP lasts before GROOVE
 const _gapDb = 15.0;
-const _riserBeats = 8.0, _riserDb = 10.0, _riserWeight = 0.4; // highs up 10 dB over 8 beats = a full riser
+// A build is a trend, so it is judged on three 1.5 s steps (four 1.5 s averages,
+// the last 6 s): each step must go the same way, none can be most of the
+// whole (that is a cut, not a fade), and the whole must go far enough.
+const _stepS = 1.5, _steps = 3;
+const _stepMaxShare = 0.6;
+const _fadeStepDb = 0.7, _fadeFromDb = 3.0, _fadeFullDb = 10.0; // the low end fading out further each step
+const _riseStepDb = 0.4, _riseFromDb = 2.0, _riseFullDb = 7.0; // the highs climbing each step (a riser, a filter opening)
+const _rollFrom = 1.5, _rollFull = 4.0; // snares per beat: 8ths and faster count as a roll, 16ths as a full one
+const _buildRiseS = 1.0; // how fast the build level follows the score up
 
 /// The part of the music playing now.
 enum MusicSection {
@@ -326,8 +337,12 @@ class MusicDetector {
 
   // levels
   double _lowAvg = _silenceDb, _highAvg = _silenceDb, _fullFast = _silenceDb, _fullSlow = _silenceDb;
-  final _highHist = _Ring((12.0 / _hopS).round());
+  double _lowSlow = _silenceDb; // the low end over ~1.5 s: how much of it a build has cut
+  double _lowFast = _silenceDb; // ...and over ~80 ms: back at full weight?
+  final _trendCut = _Ring((_stepS * (_steps + 1) / 0.25).round()); // the low end's cut every 250 ms
+  final _trendHigh = _Ring((_stepS * (_steps + 1) / 0.25).round()); // ...and the highs
   double? _ref;
+  double? _kickRef; // how loud the groove's kicks are (the low band at each kick)
 
   // sections
   MusicSection _state = MusicSection.groove;
@@ -399,7 +414,8 @@ class MusicDetector {
     _highAvg += (high - _highAvg) * _emaCoef(0.50);
     _fullFast += (full - _fullFast) * _emaCoef(0.03);
     _fullSlow += (full - _fullSlow) * _emaCoef(0.50);
-    _highHist.add(_highAvg);
+    _lowSlow += (low - _lowSlow) * _emaCoef(1.5);
+    _lowFast += (low - _lowFast) * _emaCoef(0.08);
 
     _tempo(t, kick != null ? tk : null);
     _beats(t);
@@ -578,46 +594,51 @@ class MusicDetector {
 
   void _sections(double t, double? tk) {
     final b = _beatS;
-    final ref = _ref;
-    if (ref == null) {
-      if (_kicksT.length >= 6 && _lowAvg > _silenceDb + 10) _ref = _lowAvg;
+    if (_ref == null) {
+      if (_kicksT.length >= 6 && _lowAvg > _silenceDb + 10) {
+        _ref = _lowAvg;
+        _lowSlow = _lowAvg;
+      }
       return;
     }
+    var ref = _ref!;
+    final kickLv = tk != null ? _kickOn.level : null;
+    if (n % (0.25 / _hopS).round() == 0) {
+      _trendCut.add(ref - _lowAvg);
+      _trendHigh.add(_highAvg);
+    }
     if (_state == MusicSection.groove || _state == MusicSection.drop) {
-      final k = _lowAvg > ref ? 0.2 : 0.002;
-      _ref = ref + (_lowAvg - ref) * k;
-      if (_state == MusicSection.drop && _dropLeft <= 0) _setState(t, MusicSection.groove);
-      if (_lowAvg < _ref! - _breakDb) {
+      // the groove level: up within a second, down only slowly, so a build
+      // that takes the low end away over 16 bars still shows as a cut
+      final k = _lowSlow > ref ? _emaCoef(_refUpS) : _emaCoef(_refDownS);
+      ref += (_lowSlow - ref) * k;
+      _ref = ref;
+      if (kickLv != null && _lowSlow > ref - _cutGateDb) {
+        final kr = _kickRef;
+        _kickRef = kr == null ? kickLv : kr + (kickLv - kr) * 0.1;
+      }
+      if (_state == MusicSection.drop) {
+        _dropLeft -= _hopS / b;
+        if (_dropLeft <= 0) _setState(t, MusicSection.groove);
+      }
+      _followBuild(_buildScore(t, b));
+      if (_lowAvg < ref - _breakDb) {
         final since = _belowSince ??= t;
         if (t - since >= _breakHoldBeats * b) {
-          _build = 0;
-          _buildPeak = 0;
-          _gapSent = false;
-          _breakT = since;
-          _setState(since, MusicSection.breakdown);
+          _startBreak(since, MusicSection.breakdown);
+          return;
         }
       } else {
         _belowSince = null;
       }
-      if (_state == MusicSection.drop) _dropLeft -= _hopS / b;
+      // a build with the low end filtered, not gone: no break before it
+      if (_build >= _buildOn) _startBreak(t, MusicSection.build);
       return;
     }
 
     // in a break or a build
     _belowSince = null;
-    final rate = _snaresT.values.where((s) => t - s < 2 * b).length / 2.0;
-    final density = rate < 0.25 ? 0.0 : math.min(1.0, math.max(0.0, 0.3 + 0.25 * _log2(rate)));
-    final back = (_riserBeats * b / _hopS).toInt();
-    var riser = 0.0;
-    if (_highHist.length > back) {
-      riser = math.min(1.0, math.max(0.0, (_highHist.last - _highHist[_highHist.length - 1 - back]) / _riserDb));
-    }
-    final score = 1.0 - (1.0 - density) * (1.0 - _riserWeight * riser);
-    if (score > _build) {
-      _build += (score - _build) * _emaCoef(0.25);
-    } else {
-      _build -= math.min(_build - score, _hopS / (4 * b) * 0.5);
-    }
+    _followBuild(_buildScore(t, b));
     _buildPeak = math.max(_buildPeak, _build);
     if (_state == MusicSection.breakdown && _build >= _buildOn) {
       _setState(t, MusicSection.build);
@@ -632,25 +653,85 @@ class MusicDetector {
       _emit(MusicEvent(t, MusicEventKind.gap, value: _build));
     }
 
-    // kick and bass are back
+    // kick and bass are back at full weight: a kick as loud as the groove's,
+    // or the low end itself back up
     final longEnough = t - _breakT >= _minBreakBeats * b;
-    if (tk != null && longEnough && _kickOn.level >= ref - _dropDb) {
+    final kr = _kickRef;
+    final kickBack = tk != null && kickLv != null && kr != null && kickLv >= kr - _kickBackDb;
+    final lowBack = _lowFast >= ref - _dropDb;
+    if (longEnough && (kickBack || lowBack)) {
+      final at = kickBack ? tk : t;
       final big = _buildPeak >= _bigDropBuild;
-      _emit(MusicEvent(tk, big ? MusicEventKind.drop : MusicEventKind.back, value: _buildPeak));
+      _emit(MusicEvent(at, big ? MusicEventKind.drop : MusicEventKind.back, value: _buildPeak));
       // the drop is bar 1
       if (_period > 0) {
         final prev = _nextBeat - _period;
-        final nb = (tk - prev).abs() <= (tk - _nextBeat).abs() ? _beatN - 1 : _beatN;
+        final nb = (at - prev).abs() <= (at - _nextBeat).abs() ? _beatN - 1 : _beatN;
         _barOff = nb % 4;
         _slot = [0, 0, 0, 0];
       }
       _build = 0;
+      _lowSlow = math.max(_lowSlow, ref - _dropDb); // the low end is back: no cut left over
       if (big) {
         _dropLeft = _dropBeats;
-        _setState(tk, MusicSection.drop);
+        _setState(at, MusicSection.drop);
       } else {
-        _setState(tk, MusicSection.groove);
+        _setState(at, MusicSection.groove);
       }
     }
   }
+
+  void _startBreak(double since, MusicSection state) {
+    _buildPeak = state == MusicSection.build ? _build : 0.0;
+    _gapSent = false;
+    _breakT = since;
+    _belowSince = null;
+    _setState(since, state);
+  }
+
+  /// How much it sounds like a build now, 0..1. Only with the low end cut (a
+  /// build takes the bass away), and then only for something that keeps
+  /// going one way: the bass fading out further, the highs climbing, or a
+  /// snare roll. A breakdown that just sits there with the bass out is not a
+  /// build, and with the kick and bass at full weight nothing is.
+  double _buildScore(double t, double b) {
+    final cut = _ref! - _lowSlow;
+    if (cut < _cutGateDb || _trendCut.length < _trendCut.size) return 0.0;
+    final fade = _trend(_trendCut.values.toList(), _fadeStepDb, _fadeFromDb, _fadeFullDb);
+    final rise = _trend(_trendHigh.values.toList(), _riseStepDb, _riseFromDb, _riseFullDb);
+    final perBeat = _snaresT.values.where((s) => t - s < 2 * b).length / 2.0;
+    final roll = math.min(1.0, math.max(0.0, (perBeat - _rollFrom) / (_rollFull - _rollFrom)));
+    return 1.0 - (1.0 - fade) * (1.0 - rise) * (1.0 - roll);
+  }
+
+  /// The build level follows the score: up in about a second, down at most half a level per 4 beats.
+  void _followBuild(double score) {
+    if (score > _build) {
+      _build += (score - _build) * _emaCoef(_buildRiseS);
+    } else {
+      _build -= math.min(_build - score, _hopS / (4 * _beatS) * 0.5);
+    }
+  }
+}
+
+/// 0..1: how far [v] (oldest first, every 250 ms) went up over its last
+/// [_steps] steps of [_stepS], when every step went up by at least [step] and
+/// no step was more than [_stepMaxShare] of the whole. [lo] or less counts 0,
+/// [full] or more 1.
+double _trend(List<double> v, double step, double lo, double full) {
+  final n = (_stepS / 0.25).round();
+  final means = <double>[];
+  for (var i = _steps; i >= 0; i--) {
+    var sum = 0.0;
+    for (var j = v.length - (i + 1) * n; j < v.length - i * n; j++) {
+      sum += v[j];
+    }
+    means.add(sum / n);
+  }
+  final total = means.last - means.first;
+  for (var i = 1; i < means.length; i++) {
+    final d = means[i] - means[i - 1];
+    if (d < step || d > _stepMaxShare * total) return 0.0;
+  }
+  return math.min(1.0, math.max(0.0, (total - lo) / (full - lo)));
 }

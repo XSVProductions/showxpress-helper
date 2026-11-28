@@ -39,7 +39,12 @@ void main() {
     writeSilence(p.join(tmp.path, 'second.wav'));
     settings = File(p.join(tmp.path, 'music.json'));
     // nothing listens on this port: the link stays off, which this test doesn't need
-    runner = MusicRunner(settingsFile: () => settings, os2lPort: () => 47399, playerRunning: () => false);
+    runner = MusicRunner(
+      settingsFile: () => settings,
+      os2lPort: () => 47399,
+      playerRunning: () => false,
+      recordingsFolder: () => p.join(tmp.path, 'recordings'),
+    );
   });
 
   tearDown(() async {
@@ -73,6 +78,30 @@ void main() {
     final changed = MusicSettings.fromJson({...s.toJson(), 'dropBars': 4});
     await runner.update(changed);
     expect(await device(), contains('first.wav'));
+  });
+
+  test('record starts listening and writes what it hears until stopped', () async {
+    writeMusicSettings(settings, withInput('first.wav'));
+    final on = await runner.record(true);
+    expect(runner.running, isTrue);
+    expect(on.recording, startsWith(p.join(tmp.path, 'recordings', 'SX recording ')));
+    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    expect(runner.status().recordedS, greaterThan(0.5));
+    final off = await runner.record(false);
+    expect(off.recording, '');
+    expect(runner.running, isTrue, reason: 'stopping the recording keeps listening');
+    final wav = File(on.recording);
+    expect(wav.lengthSync(), greaterThan(44 + 44100));
+    expect(ByteData.sublistView(wav.readAsBytesSync()).getUint32(40, Endian.little), wav.lengthSync() - 44);
+    expect(File(p.join(tmp.path, 'recordings', '${p.basenameWithoutExtension(wav.path)} events.txt')).existsSync(), isTrue);
+  });
+
+  test('stopping listening stops the recording', () async {
+    writeMusicSettings(settings, withInput('first.wav'));
+    await runner.record(true);
+    await runner.stop();
+    expect(runner.status().recording, '');
+    expect(Directory(p.join(tmp.path, 'recordings')).listSync().whereType<File>().where((f) => f.path.endsWith('.wav')), hasLength(1));
   });
 
   test('saving while not listening does not start it', () async {
