@@ -108,7 +108,7 @@ class _RigScreenState extends State<RigScreen> with ShowWatcher, RigReloads {
     if (!dirty) return 'The show already matches these heads.';
     return [
       if (_flipDirty) 'Reversed heads: every scene and movement flips for those heads.',
-      if (_hungDirty) 'Only chase scenes change for the hung heads. The full scenes are kept, so ticking every head puts them back.',
+      if (_hungDirty) 'Chase scenes change for the hung heads, and the BEAT scenes follow where they hang in the 2D view. The full scenes are kept, so ticking every head puts them back.',
     ].join(' ');
   }
 
@@ -136,7 +136,7 @@ class _RigScreenState extends State<RigScreen> with ShowWatcher, RigReloads {
             RigHeader(
               "Tonight's rig",
               sub:
-                  'Tap the movers that are hung tonight. Every chase scene (CHASE, SKIP AROUND, the BEAT scenes, SKIP FLASH...) drops the steps that would be dark without them, so nothing stutters. Tick them all again to put every scene back.',
+                  'Tap the movers that are hung tonight. Chase scenes (CHASE, SKIP AROUND, SKIP FLASH...) drop the steps that would be dark without them, so nothing stutters. The BEAT scenes keep their style but are made again from where the hung heads are in the 2D view. Heads not hung are hidden in the 2D and 3D views, and the 3D view puts the hung heads where the 2D view has them. Tick them all again to put every scene back.',
               dirty: d == null ? null : dirty,
               onRefresh: load,
             ),

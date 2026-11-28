@@ -19,6 +19,9 @@ class _ClosedSx implements SxApp {
   Future<ToolResult> close({bool force = false}) async => const ToolResult(ok: true);
 }
 
+/// Where the save's report goes on to the beat scenes and the views (`rig_layout.dart`).
+const _layout = '\n\n  Beat scenes and views (from where the heads are in the 2D view):\n';
+
 void main() {
   if (paritySkip != null) {
     test('rig routes', () {}, skip: paritySkip);
@@ -50,20 +53,26 @@ void main() {
     expect(r.ok, isTrue, reason: r.error);
     expect(r.out, startsWith('  Reversed heads:\n  CHANGED  140 #1: pan reversed by SX Studio\n'));
     expect(r.out, contains("values)\n\n  Tonight's Rig:\n  heads hung: 6 of ${realMovers.length}"));
-    expect(r.out, endsWith('\n\n  SKIP FLASH now flashes 6 heads'));
+    expect(r.out, contains('\n\n  SKIP FLASH now flashes 6 heads$_layout'));
+    // the beat scenes follow where the heads are in the 2D view, and the heads not hung are hidden there
+    expect(r.out, contains('  CHANGED  BEAT LEFT RIGHT: left '));
+    expect(r.out, contains(RegExp(r'  2D view: \d+ not hung hidden')));
+    expect(rigPreview(env, leave: layoutSceneFiles(env)).scenes.map((s) => s.file), isNot(contains('BEAT LEFT RIGHT.scex')));
     expect(FlipState.read(env).heads.keys, [h140.first]);
     expect(skipPreview(env).heads.where((h) => h.on).map((h) => h.id), hung);
 
     // the same save again: nothing to reverse, so no "Reversed heads" part
     final again = await client.rigApply(hung, {h140.first: (pan: true, tilt: false)});
     expect(again.out, startsWith('  heads hung: 6 of'));
-    expect(again.out, endsWith('\n\n  SKIP FLASH already flashes these 6 heads'));
+    expect(again.out, contains('\n\n  SKIP FLASH already flashes these 6 heads$_layout'));
+    expect(again.out, contains('  same     BEAT LEFT RIGHT'));
+    expect(again.out, endsWith('  3D view: already matches'));
   });
 
   test('rig save with one head leaves SKIP FLASH alone', () async {
     final r = await client.rigApply([h140.first], {});
     expect(r.ok, isTrue, reason: r.error);
-    expect(r.out, endsWith('\n\n  SKIP FLASH not changed (it needs at least 2 heads)'));
+    expect(r.out, contains('\n\n  SKIP FLASH not changed (it needs at least 2 heads)$_layout'));
   });
 
   test('rig save: the rig fails after the reversed heads were saved', () async {
@@ -106,7 +115,7 @@ void main() {
     expect(r.ok, isTrue, reason: r.error);
     // the saved rig has two 140s and no 251s hung, so no 251 comes along
     expect(r.out, contains('RIGHEADS: ${assign.values.join(',')}\nSKIPHEADS: ${assign.values.join(',')}\n\n  Tonight\'s Rig:\n  heads hung: 3 of'));
-    expect(r.out, endsWith('\n\n  SKIP FLASH now flashes 3 heads'));
+    expect(r.out, contains('\n\n  SKIP FLASH now flashes 3 heads$_layout'));
     expect(RigState.read(env).hung, assign.values);
 
     final off = await client.rtApply(assign, extra: false, rig: false);

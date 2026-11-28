@@ -93,7 +93,7 @@ class _RtScreenState extends State<RtScreen> with ShowWatcher, RigReloads {
     if (app.sxOpen) return 'ShowXpress is open. A save waits until it closes (it rewrites the 2D view when it closes).';
     final n = _placed(d).length;
     if (n == 0) return 'Put at least one mover on a truss.';
-    return '$n mover(s) on trusses. Only the 140 positions in the 2D view change${_rig ? ", plus Tonight's Rig and SKIP FLASH." : '.'}';
+    return '$n mover(s) on trusses. The 140 positions in the 2D view change${_rig ? ", plus Tonight's Rig and SKIP FLASH" : ''}. The BEAT scenes and the 3D view follow where the heads are.';
   }
 
   Future<void> _pick(RtPreview d, RtSlot slot) async {
