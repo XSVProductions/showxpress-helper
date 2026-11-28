@@ -81,5 +81,7 @@ void registerMusicRoutes(Engine e) {
 
   e.api.post('/api/music/start', (req) async => {'ok': true, 'status': (await runner.start()).toJson()});
 
+  e.api.post('/api/music/record', (req) async => {'ok': true, 'status': (await runner.record(req.body['on'] == true)).toJson()});
+
   e.api.post('/api/music/stop', (req) async => {'ok': true, 'status': (await runner.stop()).toJson()});
 }

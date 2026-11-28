@@ -139,6 +139,8 @@ class MusicStatus {
     this.link = '',
     this.linkError = '',
     this.on = const [],
+    this.recording = '',
+    this.recordedS = 0,
   });
 
   factory MusicStatus.fromJson(Json j) => MusicStatus(
@@ -154,6 +156,8 @@ class MusicStatus {
     link: j.str('link'),
     linkError: j.str('linkError'),
     on: j.strList('on'),
+    recording: j.str('recording'),
+    recordedS: j.number('recordedS'),
   );
 
   final bool running;
@@ -189,6 +193,12 @@ class MusicStatus {
   /// The titles held on now.
   final List<String> on;
 
+  /// The WAV file it is recording what it hears to, '' when it isn't.
+  final String recording;
+
+  /// How long that recording is so far, in seconds.
+  final double recordedS;
+
   Json toJson() => {
     'running': running,
     'device': device,
@@ -202,6 +212,8 @@ class MusicStatus {
     'link': link,
     'linkError': linkError,
     'on': on,
+    'recording': recording,
+    'recordedS': recordedS,
   };
 }
 
@@ -265,6 +277,9 @@ extension MusicApi on SxClient {
   Future<MusicInfo> musicSave(MusicSettings s) => post('/api/music/save', {'settings': s.toJson()}, MusicInfo.fromJson);
 
   Future<MusicStatus> musicStart() => post('/api/music/start', const <String, Object?>{}, (j) => MusicStatus.fromJson(j.obj('status')));
+
+  /// Starts recording what the detector hears (listening first if it isn't), or stops the recording.
+  Future<MusicStatus> musicRecord(bool on) => post('/api/music/record', {'on': on}, (j) => MusicStatus.fromJson(j.obj('status')));
 
   Future<MusicStatus> musicStop() => post('/api/music/stop', const <String, Object?>{}, (j) => MusicStatus.fromJson(j.obj('status')));
 }

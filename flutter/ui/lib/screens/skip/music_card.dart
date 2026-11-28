@@ -144,10 +144,25 @@ class _MusicCardState extends State<MusicCard> {
     });
   });
 
+  Future<void> _record(bool on) => _run((c) async {
+    if (on && _changed) {
+      final i = await c.musicSave(_fromFields());
+      _edit = i.settings;
+    }
+    final s = await c.musicRecord(on);
+    if (!mounted) return;
+    final i = _info;
+    setState(() {
+      if (i != null) _info = MusicInfo.fromJson({...i.toJson(), 'settings': (_edit ?? i.settings).toJson(), 'status': s.toJson()});
+      _error = '';
+    });
+  });
+
   @override
   Widget build(BuildContext context) {
     final i = _info;
     final run = i?.status.running ?? false;
+    final recording = i?.status.recording.isNotEmpty ?? false;
     return SxCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -182,6 +197,20 @@ class _MusicCardState extends State<MusicCard> {
             _statusBox(i.status),
             GroupLabel('Input'),
             _inputRow(i),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 10,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _busy || (!i.status.running && !i.canListen && !_fileInput) ? null : () => _record(!recording),
+                  icon: Icon(recording ? Icons.stop : Icons.fiber_manual_record, size: 16, color: recording ? null : Sx.redText),
+                  label: Text(recording ? 'Stop recording' : 'Record'),
+                ),
+                Text('Saves what it hears as a WAV file in Music > SX Studio recordings, with a list of the breaks, builds and drops it found.', style: Sx.sub),
+              ],
+            ),
             GroupLabel('Buttons it presses'),
             Text('Type the title of a ShowXpress button for each moment. Leave one empty to skip it.', style: Sx.sub),
             const SizedBox(height: 8),
@@ -228,6 +257,12 @@ class _MusicCardState extends State<MusicCard> {
         ],
       ),
     );
+  }
+
+  static String _clock(double seconds) {
+    final s = seconds.floor();
+    final m = s ~/ 60;
+    return '${m ~/ 60}:${(m % 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
   }
 
   bool get _fileInput => (_fields['device']?.text.trim().toLowerCase() ?? '').startsWith('file:');
@@ -327,6 +362,14 @@ class _MusicCardState extends State<MusicCard> {
             style: TextStyle(color: s.link.isNotEmpty ? Sx.text : Sx.redText, fontSize: 12.5),
           ),
           Text('Listening to ${s.device}.', style: small),
+          if (s.recording.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                'Recording ${_clock(s.recordedS)} to ${s.recording}, with what it found in an events file next to it.',
+                style: TextStyle(color: Sx.redText, fontSize: 12.5, fontWeight: FontWeight.w600),
+              ),
+            ),
         ],
       ),
     );
